@@ -5,6 +5,7 @@ const winston = require('winston');
 const Joi = require('joi');
 const shortid = require('shortid');
 const moment = require('moment');
+const { Log, loggingMiddleware, Logger } = require('./src/loggingMiddleware');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -32,16 +33,8 @@ app.use(cors());
 app.use(bodyParser.json());
 
 // Logging middleware - MANDATORY as per requirements
-app.use((req, res, next) => {
-  logger.info(`${req.method} ${req.path}`, {
-    method: req.method,
-    url: req.url,
-    ip: req.ip,
-    userAgent: req.get('User-Agent'),
-    timestamp: moment().toISOString()
-  });
-  next();
-});
+// Uses the new structured Log function that calls the Test Server
+app.use(loggingMiddleware);
 
 // In-memory storage (in production, use a database)
 const urlDatabase = new Map();
@@ -76,12 +69,12 @@ function isValidUrl(string) {
 
 // Create Short URL - POST /shorturls
 app.post('/shorturls', (req, res) => {
-  logger.info('Create short URL request received', { body: req.body });
+  Log('POST /shorturls', 'info', 'url-creation', `Creating short URL for: ${req.body.url || 'unknown URL'}`);
   
   const { error, value } = createUrlSchema.validate(req.body);
   
   if (error) {
-    logger.error('Validation error', { error: error.details });
+    Log('POST /shorturls validation', 'error', 'validation', `Validation failed: ${error.details.map(d => d.message).join(', ')}`);
     return res.status(400).json({
       error: 'Invalid request',
       details: error.details.map(detail => detail.message)
@@ -94,7 +87,7 @@ app.post('/shorturls', (req, res) => {
   let shortcode = customShortcode;
   if (shortcode) {
     if (urlDatabase.has(shortcode)) {
-      logger.error('Shortcode collision', { shortcode });
+      Log('POST /shorturls shortcode-check', 'error', 'url-creation', `Shortcode collision detected: ${shortcode} already exists`);
       return res.status(400).json({
         error: 'Shortcode already exists',
         message: 'The provided shortcode is already in use'
@@ -127,7 +120,7 @@ app.post('/shorturls', (req, res) => {
 
   const shortLink = `http://localhost:${PORT}/shorturls/${shortcode}`;
   
-  logger.info('Short URL created successfully', { shortcode, originalUrl: url });
+  Log('POST /shorturls success', 'info', 'url-creation', `Short URL created successfully: ${shortcode} -> ${url}`);
   
   res.status(201).json({
     shortLink,
@@ -139,12 +132,12 @@ app.post('/shorturls', (req, res) => {
 app.get('/shorturls/:shortcode', (req, res) => {
   const { shortcode } = req.params;
   
-  logger.info('Short URL access attempt', { shortcode });
+  Log('GET /shorturls/:shortcode', 'info', 'url-redirect', `Short URL access attempt for: ${shortcode}`);
 
   const urlData = urlDatabase.get(shortcode);
   
   if (!urlData) {
-    logger.error('Shortcode not found', { shortcode });
+    Log('GET /shorturls/:shortcode', 'error', 'url-redirect', `Shortcode not found: ${shortcode}`);
     return res.status(404).json({
       error: 'Short URL not found',
       message: 'The requested shortcode does not exist'
@@ -153,7 +146,7 @@ app.get('/shorturls/:shortcode', (req, res) => {
 
   // Check if URL has expired
   if (moment().isAfter(moment(urlData.expiry))) {
-    logger.error('Short URL expired', { shortcode, expiry: urlData.expiry });
+    Log('GET /shorturls/:shortcode', 'error', 'url-redirect', `Short URL expired: ${shortcode}, expiry was ${urlData.expiry}`);
     return res.status(410).json({
       error: 'Short URL expired',
       message: 'This short link has expired'
@@ -177,7 +170,7 @@ app.get('/shorturls/:shortcode', (req, res) => {
   urlData.clicks++;
   urlDatabase.set(shortcode, urlData);
 
-  logger.info('Redirecting to original URL', { shortcode, originalUrl: urlData.url });
+  Log('GET /shorturls/:shortcode success', 'info', 'url-redirect', `Redirecting ${shortcode} to original URL: ${urlData.url}`);
   
   // Redirect to original URL
   res.redirect(urlData.url);
@@ -187,13 +180,13 @@ app.get('/shorturls/:shortcode', (req, res) => {
 app.get('/shorturls/:shortcode/stats', (req, res) => {
   const { shortcode } = req.params;
   
-  logger.info('Statistics request', { shortcode });
+  Log('GET /shorturls/:shortcode/stats', 'info', 'analytics', `Statistics request for shortcode: ${shortcode}`);
 
   const urlData = urlDatabase.get(shortcode);
   const stats = statsDatabase.get(shortcode);
   
   if (!urlData || !stats) {
-    logger.error('Shortcode not found for stats', { shortcode });
+    Log('GET /shorturls/:shortcode/stats', 'error', 'analytics', `Shortcode not found for stats: ${shortcode}`);
     return res.status(404).json({
       error: 'Short URL not found',
       message: 'The requested shortcode does not exist'
@@ -213,14 +206,14 @@ app.get('/shorturls/:shortcode/stats', (req, res) => {
     }))
   };
 
-  logger.info('Statistics retrieved', { shortcode, totalClicks: stats.totalClicks });
+  Log('GET /shorturls/:shortcode/stats success', 'info', 'analytics', `Statistics retrieved for ${shortcode}: ${stats.totalClicks} total clicks`);
   
   res.json(response);
 });
 
 // Get all URLs (for the frontend statistics page)
 app.get('/api/urls', (req, res) => {
-  logger.info('All URLs statistics request');
+  Log('GET /api/urls', 'info', 'analytics', 'All URLs statistics request received');
   
   const allUrls = Array.from(urlDatabase.entries()).map(([shortcode, data]) => {
     const stats = statsDatabase.get(shortcode);
@@ -244,7 +237,7 @@ app.get('/health', (req, res) => {
 
 // Error handling middleware
 app.use((err, req, res, next) => {
-  logger.error('Unhandled error', { error: err.message, stack: err.stack });
+  Log('error-handler', 'error', 'backend', `Unhandled error occurred: ${err.message}, Stack: ${err.stack}`);
   res.status(500).json({
     error: 'Internal server error',
     message: 'Something went wrong on our end'
@@ -253,7 +246,7 @@ app.use((err, req, res, next) => {
 
 // 404 handler
 app.use('*', (req, res) => {
-  logger.warn('404 - Route not found', { path: req.path });
+  Log('404-handler', 'warn', 'backend', `404 - Route not found: ${req.path}`);
   res.status(404).json({
     error: 'Not found',
     message: 'The requested endpoint does not exist'
@@ -261,7 +254,7 @@ app.use('*', (req, res) => {
 });
 
 app.listen(PORT, () => {
-  logger.info(`URL Shortener Microservice running on port ${PORT}`);
+  Log('server-startup', 'info', 'backend', `URL Shortener Microservice running on port ${PORT}`);
   console.log(`Server running on http://localhost:${PORT}`);
 });
 
